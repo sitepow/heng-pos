@@ -1,0 +1,277 @@
+// use prisma-8
+
+enum PlanType {
+  FREE_TRIAL
+  MONTHLY      // เช่น 299 บาท/เดือน
+  YEARLY       // เช่น 2,990 บาท/ปี
+  LIFETIME     // จ่ายขาด เช่น 4,900 บาท
+}
+
+enum UserRole {
+  SUPER_ADMIN  // เจ้าของระบบ HengPOS
+  SHOP_OWNER   // เจ้าของร้านค้า
+  CASHIER      // พนักงานคิดเงินหน้าร้าน
+}
+
+model Shop {
+  id                  String             @id @onCreate(cuid(2))
+  name                String
+  phone               String?
+  address             String?
+  taxId               String?            // เลขผู้เสียภาษี (เผื่อออกใบเสร็จอย่างย่อ)
+  receiptHeader       String?            // ข้อความหัวใบเสร็จ
+  receiptFooter       String?            // ข้อความท้ายใบเสร็จ เช่น "ขอบคุณที่อุดหนุน"
+
+  // การตั้งค่ารับเงินของร้าน (PromptPay / Payment Gateway)
+  promptPayId         String?            // เบอร์โทร 10 หลัก หรือ เลข ปชช. 13 หลัก สำหรับเจน QR ฟรี
+  gatewayProvider     String?            // เช่น "OMISE", "STRIPE", "SLIPOK"
+  gatewayPublicKey    String?
+  gatewaySecretKey    String?            // แนะนำให้ Encrypt ก่อนเซฟลง DB
+
+  // สถานะแพ็กเกจของร้านค้า (ทำเงินรายเดือนให้คุณ)
+  planType            PlanType           @default(FREE_TRIAL)
+  subscriptionEndsAt  DateTime?
+  isActive            Boolean            @default(true)
+
+  createdAt           DateTime           @default(now()) @onCreate(now())
+  updatedAt           temporal.UpdatedAt
+
+  users               User[]
+  categories          Category[]
+  products            Product[]
+  modifierGroups      ModifierGroup[]
+  shifts              Shift[]
+  orders              Order[]
+  customers           Customer[]
+}
+
+model User {
+  id           String    @id @onCreate(cuid(2))
+  shopId       String?
+  shop         Shop?     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  email        String    @unique
+  passwordHash String
+  pinCode      String?   // รหัส PIN 4-6 หลัก สำหรับสลับแคชเชียร์หน้าจอขายเร็วๆ
+  name         String
+  role         UserRole  @default(SHOP_OWNER)
+  isActive     Boolean   @default(true)
+
+  shifts       Shift[]
+  orders       Order[]
+  createdAt    DateTime  @default(now()) @onCreate(now())
+
+  @@index([shopId])
+}
+
+model Category {
+  id        String    @id @onCreate(cuid(2))
+  shopId    String
+  shop      Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  name      String
+  sortOrder Int       @default(0)
+  products  Product[]
+
+  @@index([shopId])
+}
+
+model Product {
+  id          String                 @id @onCreate(cuid(2))
+  shopId      String
+  shop        Shop                   @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  categoryId  String?
+  category    Category?              @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
+  name        String
+  sku         String?                // รหัสบาร์โค้ด (สำหรับร้านชำใช้ปืนยิงบาร์โค้ด)
+  imageUrl    String?
+  price       Numeric(10, 2)         // ราคาขายหน้าร้าน
+  cost        Numeric(10, 2)         @default(0) // ต้นทุนสินค้า (ใช้คำนวณกำไรให้เจ้าของร้าน)
+
+  trackStock  Boolean                @default(false)
+  stockQty    Int                    @default(0)
+  isAvailable Boolean                @default(true)  // ของหมดชั่วคราว กดปิดได้ทันที
+
+  modifierGroups ProductModifierGroup[]
+  orderItems     OrderItem[]
+  stockLogs      StockLog[]
+
+  createdAt   DateTime               @default(now()) @onCreate(now())
+  updatedAt   temporal.UpdatedAt
+
+  @@index([shopId, categoryId])
+  @@index([shopId, sku])
+}
+
+// กลุ่มตัวเลือกเสริม เช่น "ระดับความหวาน", "ท็อปปิ้ง", "เพิ่มไข่"
+model ModifierGroup {
+  id          String                 @id @onCreate(cuid(2))
+  shopId      String
+  shop        Shop                   @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  name        String
+  isRequired  Boolean                @default(false)
+  maxSelect   Int                    @default(1)
+
+  modifiers   Modifier[]
+  products    ProductModifierGroup[]
+
+  @@index([shopId])
+}
+
+model Modifier {
+  id              String         @id @onCreate(cuid(2))
+  modifierGroupId String
+  modifierGroup   ModifierGroup  @relation(fields: [modifierGroupId], references: [id], onDelete: Cascade)
+  name            String         // เช่น "หวาน 50%", "เพิ่มไข่มุก"
+  extraPrice      Numeric(10, 2) @default(0) // บวกเพิ่ม เช่น +10.00 บาท
+}
+
+model ProductModifierGroup {
+  productId       String
+  modifierGroupId String
+  product         Product       @relation(fields: [productId], references: [id], onDelete: Cascade)
+  modifierGroup   ModifierGroup @relation(fields: [modifierGroupId], references: [id], onDelete: Cascade)
+
+  @@id([productId, modifierGroupId])
+}
+
+model StockLog {
+  id          String   @id @onCreate(cuid(2))
+  productId   String
+  product     Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  changeQty   Int      // เช่น -1 (ขาย), +20 (เติมของ), -2 (ของเสีย)
+  reason      String   // "SALE", "RESTOCK", "DAMAGE", "ADJUST"
+  createdAt   DateTime @default(now()) @onCreate(now())
+
+  @@index([productId])
+}
+
+model Shift {
+  id              String          @id @onCreate(cuid(2))
+  shopId          String
+  shop            Shop            @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  userId          String
+  user            User            @relation(fields: [userId], references: [id])
+
+  openedAt        DateTime        @default(now()) @onCreate(now())
+  closedAt        DateTime?
+  startingCash    Numeric(10, 2)  // เงินทอนตั้งต้นในลิ้นชัก
+  expectedCash    Numeric(10, 2)? // เงินสดที่ระบบคำนวณได้ตอนปิดกะ
+  actualCash      Numeric(10, 2)? // เงินสดที่นับได้จริงตอนปิดร้าน
+  note            String?
+
+  orders          Order[]
+
+  @@index([shopId, openedAt])
+}
+
+model Customer {
+  id        String   @id @onCreate(cuid(2))
+  shopId    String
+  shop      Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  phone     String   // ใช้เบอร์โทรสะสมแต้ม
+  name      String?
+  points    Int      @default(0)
+  orders    Order[]
+
+  @@unique([shopId, phone])
+}
+
+enum OrderStatus {
+  PENDING     // พักบิล / รอลูกค้าสแกนจ่าย
+  PAID        // จ่ายเงินสำเร็จ
+  CANCELLED   // ยกเลิกบิล
+  REFUNDED    // คืนเงิน
+}
+
+type SelectedModifier {
+  name  String
+  price String // เก็บตัวเลขทศนิยมเป็น String เช่น "10.00"
+}
+
+model Order {
+  id             String      @id @onCreate(cuid(2))
+  shopId         String
+  shop           Shop        @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  shiftId        String?
+  shift          Shift?      @relation(fields: [shiftId], references: [id])
+  cashierId      String?
+  cashier        User?       @relation(fields: [cashierId], references: [id])
+  customerId     String?
+  customer       Customer?   @relation(fields: [customerId], references: [id])
+
+  orderNumber    String      // เลขบิล เช่น "A001", "INV-20261120-001"
+  queueNumber    Int?        // เลขคิวหน้าร้าน
+  status         OrderStatus @default(PENDING)
+
+  subTotal       Numeric(10, 2)
+  discountAmount Numeric(10, 2) @default(0)
+  netTotal       Numeric(10, 2)
+
+  note           String?
+  createdAt      DateTime    @default(now()) @onCreate(now())
+
+  items          OrderItem[]
+  payments       Payment[]
+
+  @@index([shopId, createdAt])
+  @@index([shopId, status])
+}
+
+model OrderItem {
+  id           String             @id @onCreate(cuid(2))
+  orderId      String
+  order        Order              @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId    String?
+  product      Product?           @relation(fields: [productId], references: [id], onDelete: SetNull)
+
+  productName  String
+  unitPrice    Numeric(10, 2)
+  unitCost     Numeric(10, 2)     @default(0)
+  quantity     Int
+
+  modifiers    SelectedModifier[]
+  totalPrice   Numeric(10, 2)
+  note         String?
+}
+
+enum PaymentMethod {
+  CASH              // เงินสด
+  PROMPTPAY_MANUAL  // สแกน QR พร้อมเพย์ร้าน (แคชเชียร์กดยืนยันเอง)
+  PROMPTPAY_AUTO    // สแกน QR ผ่าน Gateway หรือเช็คสลิปอัตโนมัติ
+  CREDIT_CARD       // บัตรเครดิต
+  DELIVERY_APP      // Grab / LINE MAN / ShopeeFood
+}
+
+enum PaymentStatus {
+  PENDING           // รอเงินเข้า / รอ Webhook
+  SUCCESS           // ชำระเงินสำเร็จ
+  FAILED            // ชำระไม่สำเร็จ / หมดเวลา
+}
+
+model Payment {
+  id                String          @id @onCreate(cuid(2))
+  orderId           String
+  order             Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  method            PaymentMethod
+  status            PaymentStatus   @default(PENDING)
+  amount            Numeric(10, 2)
+
+  // สำหรับเงินสด
+  cashReceived      Numeric(10, 2)?
+  changeGiven       Numeric(10, 2)?
+
+  // สำหรับ Payment Gateway / สแกนจ่าย / เช็คสลิป
+  gatewayProvider   String?         // เช่น "OMISE", "STRIPE", "SLIPOK"
+  gatewayChargeId   String?         @unique
+  qrPayload         String?         // EMVCo Payload สำหรับวาดรูป QR Code
+  slipImageUrl      String?         // ลิงก์รูปสลิป
+  rawWebhookData    Json?           // เก็บ JSON จาก Webhook
+
+  paidAt            DateTime?
+  createdAt         DateTime        @default(now()) @onCreate(now())
+
+  @@index([orderId])
+  @@index([gatewayChargeId])
+}
